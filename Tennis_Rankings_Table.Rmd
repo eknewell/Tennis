@@ -1,0 +1,346 @@
+---
+title: "Tennis_Rankings_Table"
+author: "Eli"
+date: "7/5/2022"
+output: html_document
+---
+
+Load in libraries
+```{r}
+library(tidyverse)
+library(lubridate)
+library(gt)
+library(gtExtras)
+```
+#Load in data from Jeff Sackmann github for wta AND atp
+Rankings
+```{r}
+wta_rankings <- read_csv(url('https://raw.githubusercontent.com/JeffSackmann/tennis_wta/master/wta_rankings_current.csv'))
+wta_rankings$ranking_date <- ymd(wta_rankings$ranking_date)
+
+#Players list
+wta_players <- read_csv(url('https://raw.githubusercontent.com/JeffSackmann/tennis_wta/master/wta_players.csv'))
+wta_players$Name <- paste(wta_players$name_first, wta_players$name_last, sep = " ")
+
+#merge player names onto rankings
+wta_rankings <- wta_rankings %>% 
+  mutate(Name = wta_players$Name[match(player, wta_players$player_id)])
+
+#2022 stats
+wta_matches_2022 <- data.frame(read.csv(url('https://raw.githubusercontent.com/JeffSackmann/tennis_wta/master/wta_matches_2022.csv')))
+
+#sort matches oldest to most recent
+wta_matches_2022$tourney_date <- ymd(wta_matches_2022$tourney_date)
+wta_matches_2022 <- wta_matches_2022 %>% 
+  arrange(tourney_date,match_num) %>% 
+  drop_na(c(winner_rank,loser_rank))
+```
+
+retrieve current top 10, top 15, etc
+```{r}
+wta_top_ten <- wta_rankings %>% 
+  filter(ranking_date >= max(ranking_date) & rank <= 10)
+```
+
+Retrieve player's best win and worst loss
+Let's write a function! Input player name and spit out their worst loss and best win
+```{r}
+best_and_worst_result <- function(Player_Name){
+ 
+  wins <- wta_matches_2022 %>% 
+    filter(winner_name == Player_Name)
+  
+  best_win_rank <- min(wins$loser_rank)
+  best_win_name <- wins$loser_name[wins$loser_rank == best_win_rank]
+  best_win <- paste(best_win_rank,best_win_name)
+  
+  losses <- wta_matches_2022 %>% 
+    filter(loser_name == Player_Name)
+  
+  worst_loss_rank <- max(losses$winner_rank)
+  worst_loss_name <- losses$winner_name[losses$winner_rank == worst_loss_rank]
+  worst_loss <- paste(worst_loss_rank,worst_loss_name)
+  
+  return(c(best_win,worst_loss))
+}
+```
+
+Test out function
+```{r}
+best_and_worst_result('Iga Swiatek')
+```
+
+```{r}
+#Build quick loop to iterate through the top 10 (or x) players and attach results to their ranking page
+for (i in 1:nrow(wta_top_ten)) {
+  results <- best_and_worst_result(wta_top_ten$Name[i])
+  wta_top_ten$Best_Win[i] <- results[1]
+  wta_top_ten$Worst_Loss[i] <- results[2]
+}
+```
+
+Start with basic gt table, before I try to add fancy stuff
+```{r}
+wta_top_ten <- wta_top_ten %>% 
+  select('rank', 'Name','Best_Win','Worst_Loss')
+wta_top_ten <- wta_top_ten %>% 
+  mutate(Country = wta_players$ioc[match(Name, wta_players$Name)]) %>% 
+  relocate(Country, .after = Name)
+```
+#Build table woo woo
+```{r}
+top_ten_table <- wta_top_ten %>% 
+  gt()
+top_ten_table
+#first version of table is ok... I want to get country code in between Name and Best Win to not have all the names right by each other and confuse vieewer... i'll add country code above
+```
+
+Let's work on sparklines
+```{r}
+#First need to groupby player in the rankings and then capture rank
+ranklines <- wta_rankings %>%
+  mutate(rank = -1*rank) %>% 
+  group_by(Name) %>% 
+  summarise(Rank_Change = list(rank))
+```
+
+Add listed column of ranks to top ten
+```{r}
+wta_top_ten <- wta_top_ten %>% 
+  mutate(Rank_Change = ranklines$Rank_Change[match(Name, ranklines$Name)])
+```
+
+Now try and add it to table
+```{r}
+top_ten_table <- wta_top_ten %>% 
+  gt() %>% 
+  gt_sparkline(Rank_Change, label = FALSE)
+
+top_ten_table
+```
+
+Time to add win/loss ticks
+```{r}
+#Build a function to create list of their past 10 match results... assign 0 for loss, 1 for win 
+#Something like tail(10)
+#If winner_name == player_name, assign 1, if not, passing 0 to list
+#Build a for loop to loop through each players last 10 matches 
+
+player_form <- function(player_name){
+  form_list <- c()
+  #get their last 10 matches
+  player_matches <- wta_matches_2022 %>% 
+    filter(winner_name == player_name | loser_name == player_name) %>% 
+    tail(10)
+  
+  for (i in 1:nrow(player_matches)) {
+    if(player_matches$winner_name[i] == player_name){
+      form_list[i] <- 1
+    }else{
+      form_list[i] <- 0
+    }
+  }
+  return(form_list)
+}
+
+player_form('Iga Swiatek')
+```
+
+Loop through top ten, applying new function to get list of 1's and 0's for each player
+```{r}
+for (i in 1:nrow(wta_top_ten)) {
+  wta_top_ten$Form[i] <- list(player_form(wta_top_ten$Name[i]))
+}
+```
+
+Now try to add form to table
+```{r}
+top_ten_table <- wta_top_ten %>% 
+  gt() %>% 
+  tab_header(title = "WTA Top Ten 2022 Form and Best/Worst Results",
+              subtitle = "Swiatek and Jabeur show their run of form") %>% 
+  gt_sparkline(Rank_Change, label = FALSE) %>%  
+  gt_plt_winloss(Form) %>% 
+  cols_label(
+    rank = "Rank",
+    Best_Win = "Best Win",
+    Worst_Loss = "Worst Loss",
+    Rank_Change = 'Change in Rank (2022)',
+    Form = 'Last 10 Matches') %>% 
+  tab_source_note(source_note = "Data: Jeff Sackmann Repo") %>% 
+  gt_theme_538()
+top_ten_table
+```
+
+Save table
+```{r}
+gtsave_extra(top_ten_table, 'wta_table.png',  path = getwd())
+
+```
+
+Now copy above steps for ATP!
+#Load in data from Jeff Sackmann github for wta AND atp
+Rankings
+```{r}
+atp_rankings <- read_csv(url('https://raw.githubusercontent.com/JeffSackmann/tennis_atp/master/atp_rankings_current.csv'))
+atp_rankings$ranking_date <- ymd(atp_rankings$ranking_date)
+
+#Players list
+atp_players <- read_csv(url('https://raw.githubusercontent.com/JeffSackmann/tennis_atp/master/atp_players.csv'))
+atp_players$Name <- paste(atp_players$name_first, atp_players$name_last, sep = " ")
+
+#merge player names onto rankings
+atp_rankings <- atp_rankings %>% 
+  mutate(Name = atp_players$Name[match(player, atp_players$player_id)])
+
+#2022 stats
+atp_matches_2022 <- data.frame(read.csv(url('https://raw.githubusercontent.com/JeffSackmann/tennis_atp/master/atp_matches_2022.csv')))
+
+#sort matches oldest to most recent
+atp_matches_2022$tourney_date <- ymd(atp_matches_2022$tourney_date)
+atp_matches_2022 <- atp_matches_2022 %>% 
+  arrange(tourney_date,match_num) %>% 
+  drop_na(c(winner_rank,loser_rank))
+```
+
+retrieve current top 10, top 15, etc
+```{r}
+atp_top_ten <- atp_rankings %>% 
+  filter(ranking_date >= max(ranking_date) & rank <= 10)
+```
+
+Retrieve player's best win and worst loss
+Let's write a function! Input player name and spit out their worst loss and best win
+```{r}
+atp_best_and_worst_result <- function(Player_Name){
+ 
+  wins <- atp_matches_2022 %>% 
+    filter(winner_name == Player_Name)
+  
+  best_win_rank <- min(wins$loser_rank)[1]
+  best_win_name <- wins$loser_name[wins$loser_rank == best_win_rank][1]
+  best_win <- paste(best_win_rank,best_win_name)
+  
+  losses <- atp_matches_2022 %>% 
+    filter(loser_name == Player_Name)
+  
+  worst_loss_rank <- max(losses$winner_rank)[1]
+  worst_loss_name <- losses$winner_name[losses$winner_rank == worst_loss_rank][1]
+  worst_loss <- paste(worst_loss_rank,worst_loss_name)
+  
+  return(c(best_win,worst_loss))
+}
+```
+
+Test out function
+```{r}
+atp_best_and_worst_result('Carlos Alcaraz')
+```
+
+```{r}
+#Build quick loop to iterate through the top 10 (or x) players and attach results to their ranking page
+for (i in 1:nrow(atp_top_ten)) {
+  results <- atp_best_and_worst_result(atp_top_ten$Name[i])
+  atp_top_ten$Best_Win[i] <- results[1]
+  atp_top_ten$Worst_Loss[i] <- results[2]
+}
+```
+
+Start with basic gt table, before I try to add fancy stuff
+```{r}
+atp_top_ten <- atp_top_ten %>% 
+  select('rank', 'Name','Best_Win','Worst_Loss')
+atp_top_ten <- atp_top_ten %>% 
+  mutate(Country = atp_players$ioc[match(Name, atp_players$Name)]) %>% 
+  relocate(Country, .after = Name)
+```
+#Build table woo woo
+```{r}
+atp_top_ten_table <- atp_top_ten %>% 
+  gt()
+atp_top_ten_table
+#first version of table is ok... I want to get country code in between Name and Best Win to not have all the names right by each other and confuse vieewer... i'll add country code above
+```
+
+Let's work on sparklines
+```{r}
+#First need to groupby player in the rankings and then capture rank
+ranklines <- atp_rankings %>%
+  mutate(rank = -1*rank) %>% 
+  group_by(Name) %>% 
+  summarise(Rank_Change = list(rank))
+```
+
+Add listed column of ranks to top ten
+```{r}
+atp_top_ten <- atp_top_ten %>% 
+  mutate(Rank_Change = ranklines$Rank_Change[match(Name, ranklines$Name)])
+```
+
+Now try and add it to table
+```{r}
+atp_top_ten_table <- atp_top_ten %>% 
+  gt() %>% 
+  gt_sparkline(Rank_Change, label = FALSE)
+
+atp_top_ten_table
+```
+
+Time to add win/loss ticks
+```{r}
+#Build a function to create list of their past 10 match results... assign 0 for loss, 1 for win 
+#Something like tail(10)
+#If winner_name == player_name, assign 1, if not, passing 0 to list
+#Build a for loop to loop through each players last 10 matches 
+
+atp_player_form <- function(player_name){
+  form_list <- c()
+  #get their last 10 matches
+  player_matches <- atp_matches_2022 %>% 
+    filter(winner_name == player_name | loser_name == player_name) %>% 
+    tail(10)
+  
+  for (i in 1:nrow(player_matches)) {
+    if(player_matches$winner_name[i] == player_name){
+      form_list[i] <- 1
+    }else{
+      form_list[i] <- 0
+    }
+  }
+  return(form_list)
+}
+
+atp_player_form('Carlos Alcaraz')
+```
+
+Loop through top ten, applying new function to get list of 1's and 0's for each player
+```{r}
+for (i in 1:nrow(wta_top_ten)) {
+  atp_top_ten$Form[i] <- list(atp_player_form(atp_top_ten$Name[i]))
+}
+```
+
+Now try to add form to table
+```{r}
+atp_top_ten_table <- atp_top_ten %>% 
+  gt() %>% 
+  tab_header(title = "ATP Top Ten 2022 Form and Best/Worst Results",
+              subtitle = "All players have at least a top ten win") %>% 
+  gt_sparkline(Rank_Change, label = FALSE) %>%  
+  gt_plt_winloss(Form) %>% 
+  cols_label(
+    rank = "Rank",
+    Best_Win = "Best Win",
+    Worst_Loss = "Worst Loss",
+    Rank_Change = 'Change in Rank (2022)',
+    Form = 'Last 10 Matches') %>% 
+  tab_source_note(source_note = "Data: Jeff Sackmann Repo") %>% 
+  gt_theme_538()
+atp_top_ten_table
+```
+
+Save table
+```{r}
+gtsave_extra(atp_top_ten_table, 'atp_table.png',  path = getwd())
+
+```
